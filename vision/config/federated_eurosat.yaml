@@ -1,0 +1,17 @@
+# Quick run: EuroSAT, two clients (run python -m vision.scripts.setup_eurosat_dataset first)
+# Usage: CONFIG_FILE=federated_eurosat.yaml python -m vision.federated_clip_she
+defaults:
+  - federated_clip
+
+federated:
+  num_rounds: 10
+  local_steps: 100
+  use_she: true
+  he_budgets: [4, 4]
+  clients:
+    - id: 0
+      dataset: EuroSAT
+      num_samples: 2000
+    - id: 1
+      dataset: EuroSAT
+      num_samples: 2000

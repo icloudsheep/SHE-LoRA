@@ -1,0 +1,18 @@
+# Quick run: MNIST, two clients
+# Usage: CONFIG_FILE=federated_mnist.yaml python -m vision.federated_clip_she
+#   or: python -m vision.federated_clip_she federated_mnist.yaml
+defaults:
+  - federated_clip
+
+federated:
+  num_rounds: 10
+  local_steps: 100
+  use_she: true
+  he_budgets: [4, 4]
+  clients:
+    - id: 0
+      dataset: MNIST
+      num_samples: 3000
+    - id: 1
+      dataset: MNIST
+      num_samples: 5000

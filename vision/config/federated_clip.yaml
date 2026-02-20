@@ -1,0 +1,67 @@
+defaults:
+  - _self_
+
+model_name: clip-vit-base
+dataset_name: federated
+finetuning_mode: lora_federated
+
+# Data root for MNIST, CIFAR10, DTD, EuroSAT, GTSRB, SVHN (default ./data)
+data_root: ./data
+
+seed: 42
+batch_size: 32
+learning_rate: 1.0e-5
+weight_decay: 0.1
+warmup_steps: 100
+linearized_lora: false
+num_workers: 0
+
+model:
+  model_name_or_path: openai/clip-vit-base-patch16
+  input_size: 224
+  batch_size: 32
+
+lora_config:
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules:
+    - q_proj
+    - v_proj
+  inference_mode: false
+
+fabric:
+  accelerator: auto
+  devices: 1
+
+max_steps: 2000
+
+federated:
+  num_rounds: 10
+  local_steps: 100
+  aggregation_method: average
+  evaluate_every_n_rounds: 1
+  use_she: true
+  he_budgets: [4, 4]
+  clients:
+    - id: 0
+      dataset: MNIST
+      num_samples: 3000
+    - id: 1
+      dataset: MNIST
+      num_samples: 5000
+    # - id: 2
+    #   dataset: CIFAR10
+    #   num_samples: 2000
+    # - id: 3
+    #   dataset: DTD
+    #   num_samples: 2000
+    # - id: 4
+    #   dataset: EuroSAT
+    #   num_samples: 2000
+    # - id: 5
+    #   dataset: GTSRB
+    #   num_samples: 2000
+    # - id: 6
+    #   dataset: SVHN
+    #   num_samples: 2000

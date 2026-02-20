@@ -1,0 +1,6 @@
+.vscode
+logs/
+data/
+results/
+wandb/
+**/__pycache__/

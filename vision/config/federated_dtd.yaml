@@ -1,0 +1,17 @@
+# Quick run: DTD, two clients (run python -m vision.scripts.setup_dtd_dataset first)
+# Usage: CONFIG_FILE=federated_dtd.yaml python -m vision.federated_clip_she
+defaults:
+  - federated_clip
+
+federated:
+  num_rounds: 10
+  local_steps: 100
+  use_she: true
+  he_budgets: [4, 4]
+  clients:
+    - id: 0
+      dataset: DTD
+      num_samples: 2000
+    - id: 1
+      dataset: DTD
+      num_samples: 2000
