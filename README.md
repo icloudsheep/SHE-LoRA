@@ -188,6 +188,7 @@ If you find this repository useful, please consider citing it:
 	year={2026},
 }
 ```
+List of publications that cite this work: [Google Scholar](https://scholar.google.com/scholar?oi=bibs&hl=en&cites=13481755242758523388)
 
 <!-- end citation -->
 
