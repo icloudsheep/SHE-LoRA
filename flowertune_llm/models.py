@@ -10,7 +10,7 @@ from peft import (
     set_peft_model_state_dict,
 )
 from peft.utils import prepare_model_for_kbit_training
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig,AutoModelForSequenceClassification, AutoConfig
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig, AutoModelForSequenceClassification
 
 from flwr.common.typing import NDArrays
 
@@ -44,56 +44,41 @@ def get_model(model_cfg: DictConfig):
         )
     
     TASK_TYPE = "SEQ_CLS" if model_cfg.task_type == 'NLU' else "CAUSAL_LM"
-    TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING = {
-        "bert": ["query"],
-        "roberta": ["query"],
-        "roberta-large": ["query"],
-        "bert-large-cased":["query"],
-        "llama": ["q_proj"],
-        "qwen2": ["q_proj"],
-        "qwen3": ["q_proj"],
-        "mistral": ["q_proj"],
-        "open_llama_3b_v2":["q_proj"],
-        "open_llama_7b_v2":["q_proj"],
-        "Meta-Llama-3-8B":["q_proj"],
-        "Llama-3.2-3B":["q_proj"],
-        "Qwen3-4B-Instruct-2507":["q_proj","k_proj","v_proj","o_proj","up_proj","down_proj","gate_proj"],
-        "llama-30b":["q_proj"],
-        }
-    # Backward-compatible rope_scaling validation for legacy transformers versions (Llama3/Meta-Llama)
-    # name_lower = model_cfg.name.lower()
-    # rope_scaling_arg = {"type": "linear", "factor": 32.0} if ("meta-llama" in name_lower or "llama-3" in name_lower or "llama-3.2" in name_lower) else None
     if TASK_TYPE == 'CAUSAL_LM':
         if model_cfg.quantization:
             model = AutoModelForCausalLM.from_pretrained(
-                model_cfg.name,
+                model_cfg.path,
                 quantization_config=quantization_config,
                 torch_dtype=torch.bfloat16,
                 low_cpu_mem_usage=True,
+                local_files_only=model_cfg.local_files_only,
             )
         else:
             model = AutoModelForCausalLM.from_pretrained(
-            model_cfg.name,
+            model_cfg.path,
             quantization_config=quantization_config,
             torch_dtype=torch.bfloat16,
+            local_files_only=model_cfg.local_files_only,
         )
     elif TASK_TYPE == 'SEQ_CLS':
         task = model_cfg.task_type
         num_labels = 3 if task.startswith("mnli") else 1 if task=="stsb" else 2
         if model_cfg.quantization:
             model = AutoModelForSequenceClassification.from_pretrained(
-                model_cfg.name,
+                model_cfg.path,
                 quantization_config=quantization_config,
                 torch_dtype=torch.bfloat16,
                 num_labels = num_labels,
-                low_cpu_mem_usage=True
+                low_cpu_mem_usage=True,
+                local_files_only=model_cfg.local_files_only,
             )
         else:
             model = AutoModelForSequenceClassification.from_pretrained(
-            model_cfg.name,
+            model_cfg.path,
             quantization_config=quantization_config,
             torch_dtype=torch.bfloat16,
             num_labels = num_labels,
+            local_files_only=model_cfg.local_files_only,
         )
     else:
         raise NotImplementedError("Unsupported Task!")
@@ -105,8 +90,8 @@ def get_model(model_cfg: DictConfig):
     peft_config = LoraConfig(
         r=model_cfg.lora.peft_lora_r,
         lora_alpha=model_cfg.lora.peft_lora_alpha,
-        target_modules=TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_cfg.name.split("/")[1]],  
-        lora_dropout=0.075,
+        target_modules=list(model_cfg.lora.target_modules),
+        lora_dropout=model_cfg.lora.dropout,
         task_type=TASK_TYPE,
     )
 
@@ -126,4 +111,4 @@ def get_parameters(model) -> NDArrays:
 
 def save_lora_parameters(model, checkpoint_path: str) -> None:
     state_dict = get_peft_model_state_dict(model)
-    torch.save(state_dict, checkpoint_path)  
+    torch.save(state_dict, checkpoint_path)

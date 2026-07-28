@@ -6,8 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from peft.tuners.lora import LoraLayer
 from torch.utils.data import DataLoader, Subset
-from torch.utils.data import Subset
-from torchvision import transforms
 from tqdm import tqdm
 
 from vision.datasets_vision import get_vision_dataset
@@ -170,9 +168,13 @@ def setup_client_dataloaders(
     dataset_name: one of "MNIST", "CIFAR10", "DTD", "EuroSAT", "GTSRB", "SVHN".
     Returns (train_loader, test_loader, class_names).
     """
-    root = data_root or "./data"
+    if not data_root or not str(data_root).strip():
+        raise ValueError("A local vision dataset root is required.")
+    root = str(data_root)
     num_workers = getattr(cfg, "num_workers", 0) if cfg else 0
-    download = getattr(cfg, "download_datasets", True) if cfg else True
+    download = getattr(cfg, "download_datasets", False) if cfg else False
+    if download:
+        raise ValueError("Vision dataset downloads are disabled; use local files.")
 
     train_ds, classes = get_vision_dataset(
         dataset_name, root, train=True,

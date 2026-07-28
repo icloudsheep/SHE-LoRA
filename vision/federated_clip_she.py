@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -8,11 +7,9 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
-# Ensure project root and vision are on path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-VISION_ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(PROJECT_ROOT))
 
+from project_config import load_vision_config
 from vision.clip_utils import load_clip_processor_and_model, setup_fabric
 from vision.federated_vision import (
     FederatedClient,
@@ -98,50 +95,49 @@ class FederatedCLIPSHETrainer:
         self.clients: List[FederatedClient] = []
         self.server: Optional[FederatedServer] = None
         self.enc_lines: Dict[str, List[int]] = {}
-        he_budgets = getattr(cfg.federated, "he_budgets", [4] * len(cfg.federated.clients))
+        he_budgets = list(cfg.federated.he_budgets)
         if len(he_budgets) < len(cfg.federated.clients):
             he_budgets = he_budgets + [he_budgets[-1]] * (
                 len(cfg.federated.clients) - len(he_budgets)
             )
         self.he_budgets = he_budgets
 
-        model_name = getattr(cfg.model, "model_name_or_path", "openai/clip-vit-base-patch16")
-        lora_cfg = getattr(cfg, "lora_config", {"r": 8, "lora_alpha": 16})
+        model_name = cfg.model.path
+        lora_cfg = cfg.lora_config
         log.info("Creating global CLIP model: %s", model_name)
         self.processor, self.clip_model, self._vision, self._text = load_clip_processor_and_model(
             model_name,
             lora_cfg,
-            linearized_lora=getattr(cfg, "linearized_lora", False),
-            random_seed=getattr(cfg, "seed", 42),
+            linearized_lora=cfg.linearized_lora,
+            local_files_only=cfg.model.local_files_only,
+            random_seed=cfg.seed,
         )
 
     def setup_clients(self) -> None:
         log.info("Setting up federated clients")
-        model_name = getattr(self.cfg.model, "model_name_or_path", "openai/clip-vit-base-patch16")
-        input_size = getattr(self.cfg.model, "input_size", 224)
-        lora_cfg = getattr(self.cfg, "lora_config", {"r": 8, "lora_alpha": 16})
+        model_name = self.cfg.model.path
+        input_size = self.cfg.model.input_size
+        lora_cfg = self.cfg.lora_config
         for idx, client_cfg in enumerate(self.cfg.federated.clients):
             client_id = client_cfg.id
-            dataset_name = getattr(client_cfg, "dataset", "CIFAR10")
+            dataset_name = client_cfg.dataset
             num_samples = getattr(client_cfg, "num_samples", None)
             log.info("Client %s dataset %s", client_id, dataset_name)
 
             _, client_model, client_vision_model, _ = load_clip_processor_and_model(
                 model_name,
                 lora_cfg,
-                linearized_lora=getattr(self.cfg, "linearized_lora", False),
+                linearized_lora=self.cfg.linearized_lora,
+                local_files_only=self.cfg.model.local_files_only,
                 random_seed=self.cfg.seed + client_id,
             )
-            data_root = getattr(self.cfg, "data_root", None) or getattr(
-                getattr(self.cfg, "federated", None), "data_root", None
-            ) or "./data"
             train_loader, test_loader, classes = setup_client_dataloaders(
                 dataset_name=dataset_name,
                 batch_size=self.cfg.batch_size,
                 input_size=input_size,
                 num_samples=num_samples,
                 cfg=self.cfg,
-                data_root=data_root,
+                data_root=self.cfg.dataset.root,
             )
             text_embeds = create_text_embeddings(
                 classes, self.clip_model, self.processor
@@ -177,17 +173,15 @@ class FederatedCLIPSHETrainer:
                 lr_scheduler=lr_scheduler,
                 text_embeds=text_embeds,
                 dataset_name=dataset_name,
-                q=getattr(self.cfg.federated, "q", 1),
+                q=self.cfg.federated.q,
             )
             self.clients.append(client)
 
     def setup_server(self) -> None:
         self.server = FederatedServer(
             num_clients=len(self.clients),
-            aggregation_method=getattr(
-                self.cfg.federated, "aggregation_method", "average"
-            ),
-            q=getattr(self.cfg.federated, "q", 1),
+            aggregation_method=self.cfg.federated.aggregation_method,
+            q=self.cfg.federated.q,
             cfg=self.cfg,
         )
 
@@ -244,7 +238,7 @@ class FederatedCLIPSHETrainer:
         log.info("Aggregation done")
 
         # Step 4: Evaluation
-        eval_every = max(1, getattr(self.cfg.federated, "evaluate_every_n_rounds", 1))
+        eval_every = max(1, self.cfg.federated.evaluate_every_n_rounds)
         if (round_idx + 1) % eval_every == 0:
             for client in self.clients:
                 acc = client.evaluate(client.vision_model, fabric=self.fabric)
@@ -272,7 +266,7 @@ class FederatedCLIPSHETrainer:
 
         total = sum(num_examples_list)
         scales = [n / total for n in num_examples_list]
-        lora_r = int(getattr(self.cfg.lora_config, "r", 8))
+        lora_r = int(self.cfg.lora_config.r)
         context = _get_ckks_context()
 
         # 1. Aggregate plain part: B_plain × A_plain products (FLORA style)
@@ -587,11 +581,13 @@ class FederatedCLIPSHETrainer:
         """Round 0: Evaluate sensitivity on calibration data and negotiate enc_lines."""
         log.info("=== Negotiation Phase (sensitivity + negotiation) ===")
         device = next(self.clients[0].vision_model.parameters()).device
-        lora_r = 8
-        if hasattr(self.cfg, "lora_config") and hasattr(self.cfg.lora_config, "r"):
-            lora_r = int(self.cfg.lora_config.r)
+        lora_r = int(self.cfg.lora_config.r)
         self.enc_lines = _negotiation_round(
-            self.clients, self.he_budgets, lora_r, device
+            self.clients,
+            self.he_budgets,
+            lora_r,
+            device,
+            nsamples=self.cfg.federated.negotiation_samples,
         )
         log.info("Negotiation done. enc_lines layers (sample): %s", list(self.enc_lines.keys())[:3])
 
@@ -644,78 +640,17 @@ class FederatedCLIPSHETrainer:
         return str(out_dir)
 
 
-def get_default_config() -> DictConfig:
-    """Default config when no YAML is used (fully self-contained)."""
-    return OmegaConf.create({
-        "model_name": "clip-vit",
-        "dataset_name": "federated",
-        "data_root": "./data",
-        "model": {
-            "model_name_or_path": "openai/clip-vit-base-patch16",
-            "input_size": 224,
-        },
-        "seed": 42,
-        "batch_size": 32,
-        "learning_rate": 1.0e-5,
-        "weight_decay": 0.1,
-        "warmup_steps": 100,
-        "lora_config": {"r": 8, "lora_alpha": 16, "target_modules": ["q_proj", "v_proj"]},
-        "federated": {
-            "num_rounds": 3,
-            "local_steps": 50,
-            "aggregation_method": "average",
-            "evaluate_every_n_rounds": 1,
-            "use_she": True,
-            "he_budgets": [4, 4],
-            "clients": [
-                {"id": 0, "dataset": "CIFAR10", "num_samples": 1500},
-                {"id": 1, "dataset": "MNIST", "num_samples": 1500},
-            ],
-        },
-    })
-
-
-def _load_config_with_defaults(config_path: Path, config_file: str) -> DictConfig:
-    """Load YAML; if it has a defaults list, load default config first then merge."""
-    config_full = config_path / config_file if not os.path.dirname(config_file) else Path(config_file)
-    if not config_full.exists():
-        return get_default_config()
-    file_cfg = OmegaConf.load(config_full)
-    defaults = file_cfg.get("defaults", None)
-    if defaults and isinstance(defaults, (list, tuple)):
-        # Merge default config files first, then overlay current file
-        base = get_default_config()
-        for name in defaults:
-            if isinstance(name, str) and not name.startswith("_"):
-                p = config_path / (name if name.endswith(".yaml") else name + ".yaml")
-                if p.exists():
-                    base = OmegaConf.merge(base, OmegaConf.load(p))
-        overlay = {k: v for k, v in file_cfg.items() if k != "defaults"}
-        return OmegaConf.merge(base, OmegaConf.create(overlay))
-    return OmegaConf.merge(get_default_config(), file_cfg)
-
-
 def main() -> None:
     _setup_logging()
-    config_path = VISION_ROOT / "config"
-    # Config file: CLI arg > CONFIG_FILE env > default federated_clip.yaml
-    if len(sys.argv) > 1 and sys.argv[1].endswith(".yaml"):
-        config_file = sys.argv[1]
-        if os.path.dirname(config_file) and not os.path.isabs(config_file):
-            config_file = os.path.basename(config_file)
-    else:
-        config_file = os.environ.get("CONFIG_FILE", "federated_clip.yaml")
-    cfg = _load_config_with_defaults(config_path, config_file)
-    if "model_name" not in cfg:
-        cfg.model_name = "clip-vit"
-    if "dataset_name" not in cfg:
-        cfg.dataset_name = "federated"
+    cfg = load_vision_config()
     fabric = setup_fabric(cfg)
     if getattr(fabric, "logger", None) and not os.path.exists(fabric.logger.log_dir):
         os.makedirs(fabric.logger.log_dir)
     if getattr(fabric, "logger", None):
-        OmegaConf.save(cfg, os.path.join(fabric.logger.log_dir, "config.yaml"))
-    use_she = getattr(cfg.federated, "use_she", True)
+        OmegaConf.save(
+            cfg, os.path.join(fabric.logger.log_dir, "resolved_config.yaml")
+        )
+    use_she = cfg.federated.use_she
     trainer = FederatedCLIPSHETrainer(cfg, fabric, use_she=use_she)
     out = trainer.run()
     log.info("Training done. Output: %s", out)

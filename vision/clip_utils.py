@@ -14,23 +14,14 @@ log = logging.getLogger(__name__)
 def _load_clip_from_bin(
     model_name_or_path: str, local_files_only: bool
 ) -> CLIPModel:
-    from huggingface_hub import hf_hub_download
-
     config = CLIPConfig.from_pretrained(
         model_name_or_path, local_files_only=local_files_only
     )
     clip_model = CLIPModel(config)
 
-    if os.path.isdir(model_name_or_path):
-        bin_path = os.path.join(model_name_or_path, "pytorch_model.bin")
-        if not os.path.isfile(bin_path):
-            raise FileNotFoundError(f"Expected {bin_path} in local directory.")
-    else:
-        bin_path = hf_hub_download(
-            repo_id=model_name_or_path,
-            filename="pytorch_model.bin",
-            local_files_only=local_files_only,
-        )
+    bin_path = os.path.join(model_name_or_path, "pytorch_model.bin")
+    if not os.path.isfile(bin_path):
+        raise FileNotFoundError(f"Expected local model weights at {bin_path}.")
 
     state_dict = torch.load(bin_path, map_location="cpu", weights_only=True)
     if isinstance(state_dict, dict) and "state_dict" in state_dict:
@@ -42,14 +33,6 @@ def _load_clip_from_bin(
     return clip_model
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-# Supported CLIP model names
-CLIP_MODEL_NAMES = [
-    "openai/clip-vit-base-patch16",
-    "openai/clip-vit-base-patch32",
-    "openai/clip-vit-large-patch14",
-]
-
 
 def freeze_vision_only(clip_model: CLIPModel) -> CLIPModel:
     """Freeze all parameters except vision encoder and visual projection."""
@@ -97,23 +80,30 @@ def load_clip_processor_and_model(
     """
     if random_seed is not None:
         torch.manual_seed(random_seed)
-    if model_name_or_path not in CLIP_MODEL_NAMES:
-        log.warning("Model %s not in predefined list; loading from HuggingFace.", model_name_or_path)
+    if not local_files_only:
+        raise ValueError("Vision models must be loaded with local_files_only=True.")
+    model_path = Path(model_name_or_path)
+    if not model_path.is_dir():
+        raise NotADirectoryError(
+            f"Vision model path must be an existing local directory: {model_path}"
+        )
 
     processor = CLIPProcessor.from_pretrained(
-        model_name_or_path, local_files_only=local_files_only
+        str(model_path), local_files_only=True
     )
-    # Prefer safetensors; fallback to .bin via our own loader (torch.load(weights_only=True)) so torch<2.6 works
+    # Prefer local safetensors and support a local pytorch_model.bin as fallback.
     try:
         clip_model = CLIPModel.from_pretrained(
-            model_name_or_path,
-            local_files_only=local_files_only,
+            str(model_path),
+            local_files_only=True,
             use_safetensors=True,
         )
     except OSError:
-        # No safetensors: load .bin ourselves (any torch version with weights_only=True)
-        log.info("Loading %s from pytorch_model.bin (self-load to support torch<2.6).", model_name_or_path)
-        clip_model = _load_clip_from_bin(model_name_or_path, local_files_only)
+        bin_path = model_path / "pytorch_model.bin"
+        if not bin_path.is_file():
+            raise
+        log.info("Loading local model weights from %s.", bin_path)
+        clip_model = _load_clip_from_bin(str(model_path), True)
     clip_model = freeze_vision_only(clip_model)
     clip_vision_model = clip_model.vision_model
     clip_text_model = clip_model.text_model

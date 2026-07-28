@@ -1,0 +1,153 @@
+llm:
+  model:
+    active: openllama-3b-v2
+    local_files_only: true
+    variants:
+      openllama-3b-v2:
+        path: ""
+        display_name: OpenLlama-3b-v2
+        architecture: open_llama
+      openllama-7b-v2:
+        path: ""
+        display_name: OpenLlama-7b-v2
+        architecture: open_llama
+    task_type: NLG
+    quantization: 8
+    gradient_checkpointing: true
+    lora:
+      target_modules: [q_proj]
+      peft_lora_r: [8, 8, 8, 8, 8, 8, 16, 16, 16]
+      he_budget: [2, 2, 2, 2, 2, 2, 4, 4, 4, 8]
+      peft_lora_alpha: 32
+      dropout: 0.075
+
+  dataset:
+    name: dolly
+    path: ""
+    format: auto
+    split: train
+    instruction_column: instruction
+    context_column: context
+    response_column: response
+
+  calibration:
+    num_samples: 128
+    candidate_rows: 200
+    seed: 0
+    wikitext2:
+      train_path: ""
+      test_path: ""
+    c4:
+      train_path: ""
+      validation_path: ""
+
+  train:
+    save_every_round: 1
+    learning_rate_max: 5.0e-5
+    learning_rate_min: 1.0e-6
+    seq_length: 512
+    training_arguments:
+      output_dir: ""
+      learning_rate: 5.0e-5
+      per_device_train_batch_size: 1
+      gradient_accumulation_steps: 1
+      logging_steps: 10
+      num_train_epochs: 1
+      max_steps: 10
+      save_steps: 1000
+      save_total_limit: 10
+      gradient_checkpointing: true
+      lr_scheduler_type: constant
+
+  strategy:
+    fraction_fit: 0.2
+    fraction_evaluate: 0.0
+    min_fit_clients: 2
+    min_evaluate_clients: 2
+    min_available_clients: 2
+  num_server_rounds: 5
+
+  ckks_benchmark:
+    input_dir: temp_output_dir
+    input_glob: client_*_output/final_lora/adapter_model.safetensors
+    output_dir: benchmark_outputs/she_ckks
+    tensorboard_dir: runs/she_ckks
+    full_context_path: flowertune_llm/she/ckks_full_context.bytes
+    encryption_ratios: [0.0, 0.25, 0.5, 0.75, 1.0]
+    repeats: 1
+    max_clients: null
+    max_tensors: null
+    run_name: ""
+
+vision:
+  active_profile: mnist
+  common:
+    model_name: clip-vit-base
+    dataset_name: federated
+    finetuning_mode: lora_federated
+    seed: 42
+    batch_size: 32
+    learning_rate: 1.0e-5
+    weight_decay: 0.1
+    warmup_steps: 100
+    linearized_lora: false
+    num_workers: 0
+    max_steps: 2000
+    model:
+      path: ""
+      local_files_only: true
+      input_size: 224
+      batch_size: 32
+    dataset:
+      root: ""
+      download: false
+    lora_config:
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.0
+      target_modules: [q_proj, v_proj]
+      inference_mode: false
+    fabric:
+      accelerator: auto
+      devices: 1
+    federated:
+      num_rounds: 10
+      local_steps: 100
+      aggregation_method: average
+      evaluate_every_n_rounds: 1
+      use_she: true
+      he_budgets: [4, 4]
+      q: 1
+      negotiation_samples: 64
+
+  profiles:
+    mnist:
+      federated:
+        clients:
+          - {id: 0, dataset: MNIST, num_samples: 3000}
+          - {id: 1, dataset: MNIST, num_samples: 5000}
+    cifar10:
+      federated:
+        clients:
+          - {id: 0, dataset: CIFAR10, num_samples: 3000}
+          - {id: 1, dataset: CIFAR10, num_samples: 5000}
+    dtd:
+      federated:
+        clients:
+          - {id: 0, dataset: DTD, num_samples: 2000}
+          - {id: 1, dataset: DTD, num_samples: 2000}
+    eurosat:
+      federated:
+        clients:
+          - {id: 0, dataset: EuroSAT, num_samples: 2000}
+          - {id: 1, dataset: EuroSAT, num_samples: 2000}
+    gtsrb:
+      federated:
+        clients:
+          - {id: 0, dataset: GTSRB, num_samples: 20000}
+          - {id: 1, dataset: GTSRB, num_samples: 20000}
+    svhn:
+      federated:
+        clients:
+          - {id: 0, dataset: SVHN, num_samples: 3000}
+          - {id: 1, dataset: SVHN, num_samples: 5000}

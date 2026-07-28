@@ -12,8 +12,6 @@
 
 from flwr.cli.run import run
 from pathlib import Path
-import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 if __name__ == "__main__":
     root_path = Path(".")

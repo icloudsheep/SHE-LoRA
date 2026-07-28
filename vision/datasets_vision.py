@@ -92,12 +92,16 @@ def get_vision_dataset(
     train: bool,
     input_size: int = 224,
     transform: Optional[transforms.Compose] = None,
-    download: bool = True,
+    download: bool = False,
 ) -> Tuple[Dataset, List[str]]:
     """
     Return (dataset, class_names) for a given dataset.
     root: base path (e.g. "data"). Subdirs: dtd/dtd, EuroSAT_splits, gtsrb, svhn, etc.
     """
+    if download:
+        raise ValueError(
+            "Dataset downloads are disabled. Place the dataset under the configured local root."
+        )
     name_upper = dataset_name.upper()
     if transform is None:
         if name_upper == "MNIST":
@@ -113,7 +117,7 @@ def get_vision_dataset(
             ])
 
     if name_upper == "MNIST":
-        ds = MNIST(root=root, train=train, download=download, transform=transform)
+        ds = MNIST(root=root, train=train, download=False, transform=transform)
         return ds, MNIST_CLASSES
 
     if name_upper == "CIFAR10":
@@ -135,14 +139,14 @@ def get_vision_dataset(
                     (0.2023, 0.1994, 0.2010),
                 ),
             ])
-        ds = CIFAR10(root=root, train=train, download=download, transform=transform)
+        ds = CIFAR10(root=root, train=train, download=False, transform=transform)
         return ds, CIFAR10_CLASSES
 
     if name_upper == "SVHN":
         data_dir = os.path.join(root, "svhn")
         ds = SVHN(
             data_dir, split="train" if train else "test",
-            download=download, transform=transform,
+            download=False, transform=transform,
         )
         return ds, SVHN_CLASSES
 
@@ -157,7 +161,7 @@ def get_vision_dataset(
         ds = TVGTSRB(
             root=gtsrb_root,
             split="train" if train else "test",
-            download=download,
+            download=False,
             transform=transform,
         )
         return ds, GTSRB_CLASSES
@@ -168,7 +172,7 @@ def get_vision_dataset(
         if not os.path.isdir(dtd_dir):
             raise FileNotFoundError(
                 f"DTD not found at {dtd_dir}. "
-                "Run: python -m vision.scripts.setup_dtd_dataset (after extracting DTD under data/)."
+                "Prepare it with: python -m vision.scripts.setup_dtd_dataset."
             )
         ds = ImageFolder(dtd_dir, transform=transform)
         idx_to_class = {v: k for k, v in ds.class_to_idx.items()}
@@ -189,7 +193,7 @@ def get_vision_dataset(
         if not os.path.isdir(eurosat_dir):
             raise FileNotFoundError(
                 f"EuroSAT not found at {eurosat_dir}. "
-                "Run: python -m vision.scripts.setup_eurosat_dataset (after placing EuroSAT + CSVs under data/)."
+                "Prepare it with: python -m vision.scripts.setup_eurosat_dataset."
             )
         ds = ImageFolder(eurosat_dir, transform=transform)
         idx_to_class = {v: k for k, v in ds.class_to_idx.items()}
@@ -205,23 +209,22 @@ def get_vision_dataset(
 
 
 def get_vision_dataset_info(dataset_name: str) -> dict:
-    """Return info (classes, needs_download, layout) for documentation."""
+    """Return the expected local layout for a vision dataset."""
     name_upper = dataset_name.upper()
     if name_upper in ("MNIST", "CIFAR10"):
-        return {"download": True, "layout": "torchvision default"}
+        return {"requires_local_files": True, "layout": "torchvision default"}
     if name_upper == "SVHN":
-        return {"download": True, "layout": "data/svhn/"}
+        return {"requires_local_files": True, "layout": "svhn/"}
     if name_upper == "GTSRB":
-        return {"download": True, "layout": "data/gtsrb/ (torchvision GTSRB)"}
+        return {"requires_local_files": True, "layout": "gtsrb/ (torchvision GTSRB)"}
     if name_upper == "DTD":
         return {
-            "download": False,
-            "layout": "data/dtd/train/, data/dtd/val/ (ImageFolder)",
-            "url": "https://www.robots.ox.ac.uk/~vgg/data/dtd/",
+            "requires_local_files": True,
+            "layout": "dtd/train/, dtd/val/ (ImageFolder)",
         }
     if name_upper in ("EUROSAT", "EURSAT"):
         return {
-            "download": False,
-            "layout": "data/EuroSAT_splits/train/, validation/, test/ (ImageFolder)",
+            "requires_local_files": True,
+            "layout": "EuroSAT_splits/train/, validation/, test/ (ImageFolder)",
         }
     return {}

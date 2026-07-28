@@ -4,8 +4,7 @@ EuroSAT dataset folder setup.
 Organizes raw EuroSAT dir + train/validation/test CSV into data/EuroSAT_splits/{train,validation,test}.
 
 Usage:
-  DATA_ROOT=./data python -m vision.scripts.setup_eurosat_dataset
-  or: python -m vision.scripts.setup_eurosat_dataset [data_root]
+  python -m vision.scripts.setup_eurosat_dataset
 
 Requires: train.csv, validation.csv, test.csv (columns ClassName, Filename) in base dir.
 """
@@ -14,13 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
-
-def get_data_root() -> str:
-    if os.environ.get("DATA_ROOT"):
-        return os.environ["DATA_ROOT"].rstrip("/")
-    if len(sys.argv) > 1:
-        return sys.argv[1].rstrip("/")
-    return os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
+from project_config import load_vision_config, require_local_path
 
 
 def setup_eurosat_dataset(base_data_dir: str, target_data_dir: str) -> bool:
@@ -72,7 +65,10 @@ def setup_eurosat_dataset(base_data_dir: str, target_data_dir: str) -> bool:
 
 
 if __name__ == "__main__":
-    data_root = get_data_root()
+    cfg = load_vision_config(validate_paths=False)
+    data_root = require_local_path(
+        cfg.dataset.root, "vision.common.dataset.root", directory=True
+    )
     base_dir = os.path.join(data_root, "EuroSAT")
     target_dir = os.path.join(data_root, "EuroSAT_splits")
     if not os.path.isdir(base_dir):

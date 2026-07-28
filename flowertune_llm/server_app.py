@@ -4,15 +4,12 @@ import os
 from datetime import datetime
 
 from flwr.common import Context, ndarrays_to_parameters
-from flwr.common.config import unflatten_dict
 from flwr.server import ServerConfig
 from .lib.server_app import ServerApp
 from .lib.serverapp_components import ServerAppComponents
 from .strategy import FedAvg
-from omegaconf import DictConfig
-
 from flowertune_llm.models import get_model, get_parameters, set_parameters
-from flowertune_llm.dataset import replace_keys
+from project_config import load_llm_config
 
 import pickle
 from .utils import (
@@ -40,19 +37,17 @@ def get_evaluate_fn(cfg, save_every_round, total_round, save_path):
             plain_agg_results = plain_adaptive_rank(parameters,config['lora_rank'])
             new_parameters = plain_agg_results
             set_parameters(model, new_parameters) 
-            # model.save_pretrained(f"{save_path}/{cfg.model.name.split("/")[1]}/peft_round-{server_round}_rank-{config['lora_rank']}_HE-{config['he_budget']}_leak")
             cipher_agg_results = config['ckks']
 
             new_parameters = fusion_plain_cipher(plain_agg_results,cipher_agg_results,enc_lines,config["lora_rank"])
             set_parameters(model, new_parameters) 
-            # model.save_pretrained(f"{save_path}/{cfg.model.name.split("/")[1]}/peft_round-{server_round}_rank-{config['lora_rank']}_HE-{config['he_budget']}")
 
         return 0.0, {}
 
     return evaluate
 
 
-def get_on_fit_config(save_path):
+def get_on_fit_config(save_path, default_he_budget, default_lora_rank):
     """Return a function that will be used to construct the config that the client's
     fit() method will receive."""
 
@@ -60,8 +55,8 @@ def get_on_fit_config(save_path):
         fit_config = {}
         fit_config["current_round"] = server_round
         fit_config["save_path"] = save_path
-        fit_config["he_budget"] = 16 
-        fit_config["lora_rank"] = 32
+        fit_config["he_budget"] = default_he_budget
+        fit_config["lora_rank"] = default_lora_rank
         fit_config['enc_lines'] = b'' 
         fit_config['ckks'] = b''
 
@@ -89,12 +84,11 @@ def server_fn(context: Context):
     os.makedirs(save_path, exist_ok=True)
 
     # Read from config
-    num_rounds = context.run_config["num-server-rounds"]
-    cfg = DictConfig(replace_keys(unflatten_dict(context.run_config)))
+    cfg = load_llm_config()
+    num_rounds = cfg.num_server_rounds
     # INIT WANDB config
     # wandb.init(entity="laujianmin-ylab",project='flwr-simu-local', name=time.strftime('%m%d%H%M%S'),config=cfg)
-    proj_name = "SHE-LoRA "+ "-"+ cfg.model.name.split("/")[1] + "-"+cfg.dataset.name.split("/")[1] 
-    # proj_name = "Heter"+ "-"+ "SHE-LoRA "+ "-"+ cfg.model.name.split("/")[1] 
+    proj_name = f"SHE-LoRA-{cfg.model.display_name}-{cfg.dataset.name}"
     
     # INIT WANDB config
     wandb.init(entity="laujianmin-ylab",project=proj_name, name=time.strftime('%m%d%H%M%S'),config=cfg)
@@ -117,7 +111,12 @@ def server_fn(context: Context):
     strategy = FedAvg(
         fraction_fit=cfg.strategy.fraction_fit,   
         fraction_evaluate=cfg.strategy.fraction_evaluate,   
-        on_fit_config_fn=get_on_fit_config(save_path),    
+        on_fit_config_fn=get_on_fit_config(
+            save_path, max(lora_he_budgets), max_rank_of_system
+        ),
+        min_fit_clients=cfg.strategy.min_fit_clients,
+        min_evaluate_clients=cfg.strategy.min_evaluate_clients,
+        min_available_clients=cfg.strategy.min_available_clients,
         fit_metrics_aggregation_fn=fit_weighted_average,   
         initial_parameters=init_model_parameters,         
         evaluate_fn=get_evaluate_fn(                    

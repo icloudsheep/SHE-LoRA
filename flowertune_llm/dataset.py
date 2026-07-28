@@ -1,16 +1,19 @@
+from pathlib import Path
+
+from datasets import Dataset, DatasetDict, load_dataset, load_from_disk
 from transformers import AutoTokenizer
 from trl import DataCollatorForCompletionOnlyLM
 
-from flwr_datasets.partitioner import IidPartitioner, DirichletPartitioner
-from flwr_datasets import FederatedDataset
 
-FDS = None  # Cache FederatedDataset
+_DATASET_CACHE = {}
 
 
-
-def get_tokenizer_and_data_collator_and_propt_formatting(model_name: str,dataset_name:str):
+def get_tokenizer_and_data_collator_and_propt_formatting(model_path: str, dataset_cfg):
     tokenizer = AutoTokenizer.from_pretrained(
-        model_name, use_fast=True, padding_side="right"
+        model_path,
+        use_fast=True,
+        padding_side="right",
+        local_files_only=True,
     )
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -22,111 +25,77 @@ def get_tokenizer_and_data_collator_and_propt_formatting(model_name: str,dataset
     data_collator = DataCollatorForCompletionOnlyLM(
         response_template_ids, tokenizer=tokenizer
     )
-    if dataset_name == 'vicgalle/alpaca-gpt4':
-        def formatting_prompts_func(example):
-            output_texts = []
-            mssg = "Below is an instruction that describes a task. Write a response that appropriately completes the request."
-            for i in range(len(example["instruction"])):
-                text = f"{mssg}\n### Instruction:\n{example['instruction'][i]}\n### Response: {example['response'][i]}"
-                output_texts.append(text)
-            return output_texts
-        return tokenizer, data_collator, formatting_prompts_func
-    elif dataset_name == 'openai/gsm8k':
-        def formatting_prompts_gsm8k(example):
-            output_texts = []
-            for i in range(len(example["question"])):
-                text = f"### Question:\n{example['question'][i]}\n### Response: {example['response'][i]}"
-                output_texts.append(text)
-            return output_texts
-        return tokenizer, data_collator, formatting_prompts_gsm8k
-    elif dataset_name == 'Muennighoff/natural-instructions':
-        def formatting_prompts_natural_ins(example):
-            output_texts = []
-            mssg = "In this task, you're given passages that contain mentions of names of people, places, or things. Some of these mentions refer to the same person, place, or thing. Your job is to write questions that evaluate one's understanding of such references. Good questions are expected to link pronouns (she, her, him, his, their, etc.) or other mentions to people, places, or things to which they may refer. Do not ask questions that can be answered correctly without understanding the paragraph or having multiple answers. Avoid questions that do not link phrases referring to the same entity. For each of your questions, the answer should be one or more phrases in the paragraph, and it should be unambiguous."
-            for i in range(len(example['inputs'])):
-                text = f"{mssg}\n### Instruction:\n{example['inputs'][i]}\n### Response: {example['response'][i]}"
-                output_texts.append(text)
-            return output_texts
-        return tokenizer, data_collator, formatting_prompts_natural_ins
+    instruction_column = dataset_cfg.instruction_column
+    context_column = dataset_cfg.context_column
+    response_column = dataset_cfg.response_column
+
+    def formatting_prompts_func(example):
+        output_texts = []
+        contexts = example.get(context_column, [""] * len(example[instruction_column]))
+        for instruction, context, response in zip(
+            example[instruction_column], contexts, example[response_column]
+        ):
+            context_text = f"\n### Context:\n{context}" if context else ""
+            output_texts.append(
+                "Below is an instruction that describes a task. "
+                "Write a response that appropriately completes the request."
+                f"\n### Instruction:\n{instruction}{context_text}"
+                f"\n### Response: {response}"
+            )
+        return output_texts
+
+    return tokenizer, data_collator, formatting_prompts_func
 
 
+def _load_local_dataset(dataset_cfg) -> Dataset:
+    path = Path(dataset_cfg.path)
+    cache_key = (str(path), dataset_cfg.split, dataset_cfg.format)
+    if cache_key in _DATASET_CACHE:
+        return _DATASET_CACHE[cache_key]
 
-def load_data(partition_id: int, num_partitions: int, dataset_name: str):
-    """Load partition data."""
-    global FDS
-    subname = 'main' if dataset_name=='openai/gsm8k' else None
-    if FDS is None:
-        if dataset_name == "Muennighoff/natural-instructions":
-            FDS = FederatedDataset(
-                dataset=dataset_name,
-                partitioners={
-                "train": DirichletPartitioner(
-                    num_partitions=num_partitions,
-                    partition_by="task_name",
-                    alpha=10,
-                    seed=42,
-                    min_partition_size=0,),
-                    },
+    if path.is_dir():
+        dataset = load_from_disk(str(path))
+        if isinstance(dataset, DatasetDict):
+            if dataset_cfg.split not in dataset:
+                raise KeyError(
+                    f"Split '{dataset_cfg.split}' is not present in {path}."
                 )
-        else:
-            partitioner = IidPartitioner(num_partitions=num_partitions)
-            FDS = FederatedDataset(
-                dataset=dataset_name,
-                subset= subname,
-                partitioners={"train": partitioner},
-                )
-        
-    client_trainset = FDS.load_partition(partition_id, "train")
-    if dataset_name == "Muennighoff/natural-instructions":
-        import random
-        nums_train_sample = 5000
-        indices = random.sample(range(len(client_trainset)), nums_train_sample)
-        client_trainset = client_trainset.select(indices)
+            dataset = dataset[dataset_cfg.split]
+    else:
+        dataset_format = dataset_cfg.format
+        if dataset_format == "auto":
+            extensions = {
+                ".json": "json",
+                ".jsonl": "json",
+                ".parquet": "parquet",
+                ".csv": "csv",
+            }
+            dataset_format = extensions.get(path.suffix.lower())
+        if dataset_format not in {"json", "parquet", "csv"}:
+            raise ValueError(f"Unsupported local dataset format for {path}.")
+        dataset = load_dataset(
+            dataset_format,
+            data_files={dataset_cfg.split: str(path)},
+            split=dataset_cfg.split,
+        )
 
-    input_keys = {
-        "vicgalle/alpaca-gpt4":"output",
-        "openai/gsm8k":"answer",
-        "Muennighoff/natural-instructions":"targets",
+    required_columns = {
+        dataset_cfg.instruction_column,
+        dataset_cfg.response_column,
     }
+    missing = required_columns.difference(dataset.column_names)
+    if missing:
+        raise ValueError(f"Dolly dataset is missing columns: {sorted(missing)}")
+    _DATASET_CACHE[cache_key] = dataset
+    return dataset
 
-    client_trainset = client_trainset.rename_column(input_keys[dataset_name], "response")
 
-    return client_trainset
-
-def load_glue_data(partition_id: int, num_partitions: int, dataset_name: str):
-    """Load partition data."""
-    global FDS
-    if FDS is None:
-        partitioner = IidPartitioner(num_partitions=num_partitions)
-        FDS = FederatedDataset(
-            dataset="glue",
-            subset=dataset_name,
-            partitioners={"train": partitioner},
+def load_data(partition_id: int, num_partitions: int, dataset_cfg):
+    dataset = _load_local_dataset(dataset_cfg)
+    if not 0 <= partition_id < num_partitions:
+        raise ValueError(
+            f"partition_id must be in [0, {num_partitions}), got {partition_id}."
         )
-    client_trainset = FDS.load_partition(partition_id, "train")
-
-    return client_trainset
-
-def load_imdb_data(partition_id: int, num_partitions: int, dataset_name: str):
-    """Load partition data."""
-    global FDS
-    if FDS is None:
-        partitioner = IidPartitioner(num_partitions=num_partitions)
-        FDS = FederatedDataset(
-            dataset=dataset_name,
-            partitioners={"train": partitioner},
-        )
-    client_trainset = FDS.load_partition(partition_id, "train")
-
-    return client_trainset
-
-
-def replace_keys(input_dict, match="-", target="_"):
-    new_dict = {}
-    for key, value in input_dict.items():
-        new_key = key.replace(match, target)
-        if isinstance(value, dict):
-            new_dict[new_key] = replace_keys(value, match, target)
-        else:
-            new_dict[new_key] = value
-    return new_dict
+    return dataset.shard(
+        num_shards=num_partitions, index=partition_id, contiguous=True
+    )

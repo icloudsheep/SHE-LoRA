@@ -1,8 +1,6 @@
-import os
 from typing import Optional, Tuple
 
-import torch
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, MNIST
 
@@ -16,34 +14,35 @@ def get_vision_calibration_loader(
     data_root: Optional[str] = None,
 ) -> DataLoader:
     """
-    Returns a DataLoader of images for calibration (no labels needed for sensitivity).
-    Uses torchvision CIFAR10/MNIST or dummy tensor data.
+    Return local CIFAR10 or MNIST images for calibration.
     """
-    root = data_root or "./data"
+    if not data_root or not str(data_root).strip():
+        raise ValueError("A local vision dataset root is required for calibration.")
+    root = str(data_root)
     n_total = num_batches * batch_size
-    try:
-        if dataset_name.upper() == "MNIST":
-            transform = transforms.Compose([
-                transforms.Resize((input_size, input_size)),
-                transforms.Grayscale(num_output_channels=3),
-                transforms.ToTensor(),
-            ])
-            ds = MNIST(root=root, train=True, download=True, transform=transform)
-        else:
-            transform = transforms.Compose([
-                transforms.Resize((input_size, input_size)),
-                transforms.ToTensor(),
-            ])
-            ds = CIFAR10(root=root, train=True, download=True, transform=transform)
-        ds = torch.utils.data.Subset(ds, range(min(n_total, len(ds))))
-        return DataLoader(
-            ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+    if dataset_name.upper() == "MNIST":
+        transform = transforms.Compose([
+            transforms.Resize((input_size, input_size)),
+            transforms.Grayscale(num_output_channels=3),
+            transforms.ToTensor(),
+        ])
+        ds = MNIST(root=root, train=True, download=False, transform=transform)
+    elif dataset_name.upper() == "CIFAR10":
+        transform = transforms.Compose([
+            transforms.Resize((input_size, input_size)),
+            transforms.ToTensor(),
+        ])
+        ds = CIFAR10(root=root, train=True, download=False, transform=transform)
+    else:
+        raise ValueError(
+            "Standalone vision calibration supports local MNIST or CIFAR10 only."
         )
-    except Exception:
-        dummy = torch.randn(n_total, 3, input_size, input_size)
-        return DataLoader(
-            TensorDataset(dummy), batch_size=batch_size, shuffle=False
-        )
+    from torch.utils.data import Subset
+
+    ds = Subset(ds, range(min(n_total, len(ds))))
+    return DataLoader(
+        ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
+    )
 
 
 def get_vision_calibration_loader_from_loader(

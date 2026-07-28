@@ -120,10 +120,39 @@ pip install -e .
 ```
 
 ### 2. Run SHE-LoRA
+
+All model, dataset, training, LoRA, SHE, and federated-learning settings are
+defined in the root [config.yaml](config.yaml). Relative resource paths are
+resolved from the repository root; absolute paths are also supported. The
+project never downloads a model or dataset and does not fall back to an online
+resource. Empty, missing, or unsupported resource paths fail immediately.
+
+Before running the LLM experiment, select one of the supported OpenLlama
+variants and fill in its local model directory and the local Dolly dataset
+path:
+
+```yaml
+llm:
+  model:
+    active: openllama-3b-v2  # or openllama-7b-v2
+    variants:
+      openllama-3b-v2:
+        path: "/path/to/open_llama_3b_v2"
+      openllama-7b-v2:
+        path: "/path/to/open_llama_7b_v2"
+  dataset:
+    path: "/path/to/dolly"
+```
+
+The Dolly path may point to a Hugging Face `Dataset`/`DatasetDict` saved with
+`save_to_disk`, or to a local `.json`, `.jsonl`, `.parquet`, or `.csv` file.
+If Wikitext2 or C4 calibration is used directly, fill in the corresponding
+local file paths under `llm.calibration` as well.
+
 **Generate HE keys**
 
 ```bash
-python ./flowertune_llm/she/gen_ckks_keys.py
+./run.sh keys
 ```
 
 **Run with Flower CLI (recommended):**
@@ -139,27 +168,75 @@ flwr run .
 python pythonic_starter.py
 ```
 
-**Override config from command line (optional):**
+### 3. Benchmark local safetensors with CKKS
+
+The standalone benchmark reads client adapters directly and does not start a
+Flower federation. Configure `llm.ckks_benchmark` in `config.yaml`, then run:
 
 ```bash
-# Different model and quantization
-flwr run . --run-config "model.name='openlm-research/open_llama_7b_v2' model.quantization=8"
-
-# Fewer rounds, different participation rate
-flwr run . --run-config "num-server-rounds=50 strategy.fraction-fit=0.25"
+./run.sh setup
+./run.sh benchmark
+./run.sh tensorboard
 ```
 
-Main configurations (model, dataset, LoRA rank, HE budget, rounds, etc.) are in [pyproject.toml](pyproject.toml) under `[tool.flwr.app.config]` and `[tool.flwr.federations.local-simulation]`. Ensure `model.lora.peft-lora-r` and `model.lora.he-budget` list lengths match the number of client types.
+`./run.sh all` runs the benchmark and then starts TensorBoard. The `setup`
+command creates only the minimal Conda environment required by this standalone
+benchmark; it does not install the full federated training environment.
+
+By default it discovers
+`temp_output_dir/client_*_output/final_lora/adapter_model.safetensors` and
+compares 0%, 25%, 50%, 75%, and 100% encryption. For every LoRA A tensor, the
+configured proportion of columns from the beginning of the tensor is encrypted
+with CKKS; all remaining values are aggregated in plaintext. LoRA B and other
+tensors are aggregated in plaintext. Aggregation is an equal-weight mean.
+
+Each ratio produces an `adapter_model.safetensors`, and the run also produces
+`summary.json` and `summary.csv`. TensorBoard records loading, encryption,
+plaintext aggregation, ciphertext aggregation, decryption, serialization, and
+saving time, along with plaintext/ciphertext upload bytes and aggregate
+ciphertext download bytes. CKKS context/key transfer and local input file
+headers are reported separately and are not counted as client payload. Set
+`max_clients` or `max_tensors` only for a quick smoke test; leave both as `null`
+for the full experiment.
+
+`aggregate_ciphertext_bytes` is one aggregated ciphertext result;
+`aggregate_ciphertext_broadcast_bytes` counts sending that result to every
+client. This makes both a server-only pipeline and a federated-style broadcast
+comparison visible without changing the benchmark execution.
+
+To measure only 25%, set:
+
+```yaml
+llm:
+  ckks_benchmark:
+    encryption_ratios: [0.25]
+```
+
+The number of encrypted columns is `ceil(input_columns * ratio)`. With the
+current `[4, 3200]` LoRA A tensors, 25% encrypts the first 800 columns. The
+benchmark follows the repository's one-CKKS-vector-per-column representation,
+so a full 50-client comparison can take substantial time.
+
+Flower application registration and local-simulation topology remain in
+[pyproject.toml](pyproject.toml), because Flower reads them before the Python
+application starts. Business and training parameters are read only from the
+root `config.yaml`. The legacy files under `vision/config/` are retained for
+reference but are no longer loaded.
 
 **Run the CLIP (vision) version:**
+
+Set `vision.active_profile`, `vision.common.model.path`, and
+`vision.common.dataset.root` in the root `config.yaml` first. The model path
+must be a local Transformers-compatible CLIP directory, and the dataset root
+must already contain the selected local dataset.
 
 ```bash
 # Preprocess datasets (required only for DTD and EuroSAT)
 python -m vision.scripts.setup_dtd_dataset
 python -m vision.scripts.setup_eurosat_dataset
 
-# Run federated CLIP with SHE; choose one config per run
-python -m vision.federated_clip_she federated_mnist.yaml
+# Run federated CLIP with SHE
+python -m vision.federated_clip_she
 ```
 <!-- end run -->
 
@@ -196,5 +273,3 @@ List of publications that cite this work: [Google Scholar](https://scholar.googl
 
 This project is licensed under **Apache-2.0**.  We build on [<img src="https://flower.dev/favicon.ico" width="16" height="16" alt="Flower" /> Flower](https://flower.dev/), [<img src="https://huggingface.co/favicon.ico" width="16" height="16" alt="PEFT" /> PEFT](https://huggingface.co/docs/peft), [<img src="https://github.com/favicon.ico" width="16" height="16" alt="TenSEAL" /> TenSEAL](https://github.com/OpenMined/TenSEAL), and [<img src="https://huggingface.co/favicon.ico" width="16" height="16" alt="Transformers" /> Hugging Face Transformers](https://huggingface.co/docs/transformers).
 Some codes are derived from the [Wanda](https://github.com/locuslab/wanda), [DAGER](https://github.com/insait-institute/dager-gradient-inversion) and [FastMIA](https://github.com/Nikkei/fast-mia) projects, and we thank the authors who have contributed to those great open source works.
-
-

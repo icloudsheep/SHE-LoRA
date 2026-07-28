@@ -11,10 +11,14 @@
 
 # Code adapted from https://github.com/IST-DASLab/sparsegpt/blob/master/datautils.py
 
+from pathlib import Path
+
 import numpy as np
 import random
 import torch
 from datasets import load_dataset
+
+from project_config import load_project_config, require_local_path
 
 # Set seed for reproducibility
 def set_seed(seed):
@@ -26,15 +30,48 @@ class TokenizerWrapper:
     def __init__(self, input_ids):
         self.input_ids = input_ids
 
-# Load and process wikitext2 dataset
+def _load_local_text(path_value, field):
+    path = Path(require_local_path(path_value, field))
+    if not path.is_file():
+        raise FileNotFoundError(f"{field} must be a local file: {path}")
+    suffixes = [suffix.lower() for suffix in path.suffixes]
+    if suffixes[-1:] in [[".json"], [".jsonl"]] or suffixes[-2:] in [
+        [".json", ".gz"],
+        [".jsonl", ".gz"],
+    ]:
+        dataset = load_dataset("json", data_files=str(path), split="train")
+    elif suffixes[-1:] in [[".txt"], [".text"]] or suffixes[-2:] in [
+        [".txt", ".gz"],
+        [".text", ".gz"],
+    ]:
+        dataset = load_dataset("text", data_files=str(path), split="train")
+    else:
+        raise ValueError(
+            f"Unsupported local calibration format for {field}: {path.name}"
+        )
+    if "text" not in dataset.column_names:
+        raise ValueError(f"{field} must provide a 'text' column.")
+    return dataset
+
+
+# Load and process local Wikitext2 data.
 def get_wikitext2(nsamples, seed, seqlen, tokenizer):
-    # Load train and test datasets
-    traindata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='train')
-    testdata = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
+    cfg = load_project_config().llm.calibration.wikitext2
+    traindata = _load_local_text(
+        cfg.train_path, "llm.calibration.wikitext2.train_path"
+    )
+    testdata = _load_local_text(
+        cfg.test_path, "llm.calibration.wikitext2.test_path"
+    )
 
     # Encode datasets
     trainenc = tokenizer(" ".join(traindata['text']), return_tensors='pt')
     testenc = tokenizer("\n\n".join(testdata['text']), return_tensors='pt')
+    if trainenc.input_ids.shape[1] <= seqlen:
+        raise ValueError(
+            "The local Wikitext2 training file does not contain enough tokens "
+            f"for seqlen={seqlen}."
+        )
 
     # Generate samples from training set
     random.seed(seed)
@@ -48,27 +85,28 @@ def get_wikitext2(nsamples, seed, seqlen, tokenizer):
         trainloader.append((inp, tar))
     return trainloader, testenc
 
-# Load and process c4 dataset
+# Load and process local C4 data.
 def get_c4(nsamples, seed, seqlen, tokenizer):
-    data_files = {'train': './data/c4-train.00000-of-01024.json.gz',
-                'validation': './data/c4-validation.00000-of-00008.json.gz'
-    }
-    # Load train and validation datasets
-    # traindata = load_dataset('allenai/c4', 'allenai--c4', data_files={'train': 'en/c4-train.00000-of-01024.json.gz'}, split='train')
-    # valdata = load_dataset('allenai/c4', 'allenai--c4', data_files={'validation': 'en/c4-validation.00000-of-00008.json.gz'}, split='validation')
-
-    traindata = load_dataset('json',data_files=data_files['train'],split='train')
-    valdata = load_dataset('json',data_files=data_files['validation'],split='train')
+    cfg = load_project_config().llm.calibration.c4
+    traindata = _load_local_text(cfg.train_path, "llm.calibration.c4.train_path")
+    valdata = _load_local_text(
+        cfg.validation_path, "llm.calibration.c4.validation_path"
+    )
 
     # Generate samples from training set
     random.seed(seed)
     trainloader = []
     for _ in range(nsamples):
-        while True:
+        for _attempt in range(1000):
             i = random.randint(0, len(traindata) - 1)
             trainenc = tokenizer(traindata[i]['text'], return_tensors='pt')
             if trainenc.input_ids.shape[1] > seqlen:
                 break
+        else:
+            raise ValueError(
+                "The local C4 training file has no sampled records longer than "
+                f"seqlen={seqlen}."
+            )
         i = random.randint(0, trainenc.input_ids.shape[1] - seqlen - 1)
         j = i + seqlen
         inp = trainenc.input_ids[:, i:j]
@@ -89,51 +127,25 @@ def find_first_common(list1, list2):
             return item
     return None  
 
-def get_tokenizer(actual_task,calibdation_set, nsamples, seed, seqlen, tokenizer):
+def get_tokenizer(
+    calibdation_set, nsamples, seed, seqlen, tokenizer, text_column
+):
     traindata = calibdation_set
-    task_to_keys = {
-        "vicgalle/alpaca-gpt4":"text",
-        "stanfordnlp/imdb":"text",
-        "openai/gsm8k":"question",
-        "Muennighoff/natural-instructions":"inputs"
-    }
-    key = task_to_keys[actual_task]
+    if not text_column:
+        raise ValueError("A local calibration text column is required.")
+    if text_column not in traindata.column_names:
+        raise ValueError(
+            f"Calibration dataset is missing the '{text_column}' column."
+        )
+    if len(traindata) < nsamples:
+        raise ValueError(
+            f"Calibration requires {nsamples} rows, but only {len(traindata)} are available."
+        )
     # Generate samples from training set
     random.seed(seed)
     trainloader = []
     for i in range(nsamples):
-        trainenc = tokenizer(traindata[key][i], padding='max_length',truncation=True,max_length=seqlen,return_tensors='pt')
-        inp = trainenc.input_ids
-        tar = inp.clone()
-        tar[:, :-1] = -100  
-        trainloader.append((inp, tar))
-
-    return trainloader, []
-
-def get_nlu_tokenizer(task_name,calibdation_set, nsamples, seed, seqlen, tokenizer):
-    traindata = calibdation_set
-    task_to_keys = {
-            "cola": ("sentence", None),
-            "mnli": ("premise", "hypothesis"),
-            "mnli": ("premise", "hypothesis"),
-            "mrpc": ("sentence1", "sentence2"),
-            "qnli": ("question", "sentence"),
-            "qqp": ("question1", "question2"),
-            "rte": ("sentence1", "sentence2"),
-            "sst2": ("sentence", None),
-            "stsb": ("sentence1", "sentence2"),
-            "wnli": ("sentence1", "sentence2"),
-            "stanfordnlp/imdb":("text", None)
-        }
-    random.seed(seed)
-    trainloader = []
-    for i in range(nsamples):
-        sentence1_key, sentence2_key = task_to_keys[task_name]
-        if sentence2_key is None:
-            trainenc = tokenizer(traindata[sentence1_key][i], padding='max_length',truncation=True,max_length=seqlen,return_tensors='pt')
-        else:
-            trainenc = tokenizer(traindata[sentence1_key], traindata[sentence2_key], padding='max_length',truncation=True,max_length=seqlen,return_tensors='pt')
-        
+        trainenc = tokenizer(traindata[text_column][i], padding='max_length',truncation=True,max_length=seqlen,return_tensors='pt')
         inp = trainenc.input_ids
         tar = inp.clone()
         tar[:, :-1] = -100  
@@ -142,12 +154,11 @@ def get_nlu_tokenizer(task_name,calibdation_set, nsamples, seed, seqlen, tokeniz
     return trainloader, []
 
 # Function to select the appropriate loader based on dataset name
-def get_loaders(task_type='NLU',actual_task='', nsamples=128, seed=0, seqlen=2048, tokenizer=None,dataset=None):
+def get_loaders(task_type='NLU',actual_task='', nsamples=128, seed=0, seqlen=2048, tokenizer=None,dataset=None, text_column=None):
     if 'wikitext2' in actual_task:
         return get_wikitext2(nsamples, seed, seqlen, tokenizer)
     if "c4" in actual_task:
         return get_c4(nsamples, seed, seqlen, tokenizer)
     if task_type == "NLU":
-        return get_nlu_tokenizer(actual_task,dataset,nsamples, seed, seqlen, tokenizer)
-    else:
-        return get_tokenizer(actual_task,dataset,nsamples, seed, seqlen, tokenizer)
+        raise ValueError("Only NLG calibration with local datasets is supported.")
+    return get_tokenizer(dataset, nsamples, seed, seqlen, tokenizer, text_column)

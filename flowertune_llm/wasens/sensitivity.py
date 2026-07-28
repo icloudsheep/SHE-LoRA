@@ -100,13 +100,13 @@ def prepare_calibration_input(model, dataloader, device, model_type=None):
             layers = model.base_model.model.model.layers
     else:
         layers = model.model.layers
-    
+
     # dev = model.hf_device_map["model.embed_tokens"]
     if "model.embed_tokens" in model.hf_device_map:
         device = model.hf_device_map["model.embed_tokens"]
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros((128, model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
+    inps = torch.zeros((len(dataloader), model.seqlen, model.config.hidden_size), dtype=dtype, device=device)
     inps.requires_grad = False
     cache = {'i': 0, 'attention_mask': None, "position_ids": None}
 
@@ -145,7 +145,7 @@ def prepare_calibration_input(model, dataloader, device, model_type=None):
     outs = torch.zeros_like(inps)
     attention_mask = cache['attention_mask']
     position_ids = cache['position_ids']
-    
+
     position_embeddings = None
     if model_type == 'lora':
         if not isinstance(model.base_model.model, BertForSequenceClassification):
@@ -176,13 +176,22 @@ def return_given_alpha(alpha, sort_res, W_metric, tmp_metric, sum_before):
 
 
 
-def evaluate_lora_importance(model, calibdation_set, tokenizer,task_type,actual_task, device=torch.device("cuda:0")):
+def evaluate_lora_importance(
+    model,
+    calibdation_set,
+    tokenizer,
+    task_type,
+    actual_task,
+    device=torch.device("cuda:0"),
+    text_column=None,
+    nsamples=128,
+    seed=0,
+):
     use_cache = model.config.use_cache 
     model.config.use_cache = False 
-    nsamples = 128 # calibration data sample nums
 
     print("loading calibdation data")
-    dataloader, _ = get_loaders(task_type,actual_task,nsamples,seed=0,seqlen=model.seqlen,tokenizer=tokenizer,dataset=calibdation_set)
+    dataloader, _ = get_loaders(task_type,actual_task,nsamples,seed=seed,seqlen=model.seqlen,tokenizer=tokenizer,dataset=calibdation_set,text_column=text_column)
     print("dataset loading complete")
     with torch.no_grad():
         inps, outs, attention_mask, position_ids, position_embeddings = prepare_calibration_input(model, dataloader, device,model_type='lora')
@@ -272,5 +281,3 @@ def evaluate_lora_importance(model, calibdation_set, tokenizer,task_type,actual_
     model.config.use_cache = use_cache 
     torch.cuda.empty_cache()
     return importance_scores, element_importance # dict(dict(layer,ndarray(4096)))
-
-    

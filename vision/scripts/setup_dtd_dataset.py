@@ -4,8 +4,7 @@ DTD dataset folder setup.
 Organizes DTD images/labels into data/dtd/train and data/dtd/val for ImageFolder.
 
 Usage:
-  DATA_ROOT=./data python -m vision.scripts.setup_dtd_dataset
-  or: python vision/scripts/setup_dtd_dataset.py [data_root]
+  python -m vision.scripts.setup_dtd_dataset
 
 Download: https://www.robots.ox.ac.uk/~vgg/data/dtd/
 After extract: <root>/dtd/images/, <root>/dtd/labels/, train1.txt, val1.txt, etc.
@@ -14,14 +13,7 @@ import os
 import shutil
 import sys
 
-
-def get_data_root():
-    if os.environ.get("DATA_ROOT"):
-        return os.environ["DATA_ROOT"].rstrip("/")
-    if len(sys.argv) > 1:
-        return sys.argv[1].rstrip("/")
-    base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    return os.path.join(base, "data")
+from project_config import load_vision_config, require_local_path
 
 
 def setup_dtd_dataset(root_dir, use_split=1):
@@ -73,7 +65,10 @@ def setup_dtd_dataset(root_dir, use_split=1):
 
 
 if __name__ == "__main__":
-    data_root = get_data_root()
+    cfg = load_vision_config(validate_paths=False)
+    data_root = require_local_path(
+        cfg.dataset.root, "vision.common.dataset.root", directory=True
+    )
     dtd_root = os.path.join(data_root, "dtd")
     if not os.path.isdir(dtd_root):
         print("Error: DTD root not found:", dtd_root)
