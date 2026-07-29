@@ -20,14 +20,18 @@ Commands:
   all          Run the benchmark, then start TensorBoard.
   help         Show this help message.
 
-Before measuring 25% encryption, set this value in config.yaml:
+The default benchmark compares 0.125%, 1%, 10%, and 25% encryption with four
+clients. Change these values in config.yaml when another experiment is needed:
 
   llm:
     ckks_benchmark:
-      encryption_ratios: [0.25]
+      encryption_ratios: [0.00125, 0.01, 0.1, 0.25]
+      max_clients: 4
+      client_workers: 4
+      server_workers: 4
 
-For a quick smoke test, also set max_clients and max_tensors to small positive
-values. Leave both as null for the complete experiment.
+For a quick smoke test, set max_tensors to a small positive value. Leave it as
+null to process every LoRA A/B pair from the four selected clients.
 
 Examples:
   ./run.sh setup

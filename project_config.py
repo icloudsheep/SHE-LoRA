@@ -87,10 +87,19 @@ def load_ckks_benchmark_config(validate_paths: bool = True) -> DictConfig:
         )
     if int(cfg.repeats) < 1:
         raise ValueError("llm.ckks_benchmark.repeats must be at least 1.")
-    for field in ("max_clients", "max_tensors"):
+    for field in (
+        "max_clients",
+        "max_tensors",
+        "client_workers",
+        "server_workers",
+    ):
         value = cfg.get(field)
         if value is not None and int(value) < 1:
             raise ValueError(f"llm.ckks_benchmark.{field} must be null or positive.")
+    if int(cfg.ciphertext_batch_columns) < 1:
+        raise ValueError(
+            "llm.ckks_benchmark.ciphertext_batch_columns must be positive."
+        )
     if not str(cfg.input_glob).strip():
         raise ValueError("llm.ckks_benchmark.input_glob cannot be empty.")
     if cfg.run_name:
