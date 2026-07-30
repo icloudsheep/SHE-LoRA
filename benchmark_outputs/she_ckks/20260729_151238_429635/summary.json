@@ -1,0 +1,33 @@
+[
+  {
+    "ratio": 0.0,
+    "repeat": 1,
+    "client_count": 20,
+    "tensor_count": 208,
+    "encrypted_tensor_count": 0,
+    "encrypted_columns": 0,
+    "context_load_seconds": 0.10843127593398094,
+    "load_seconds": 0.10265371203422546,
+    "encrypt_seconds": 0.0,
+    "aggregate_plain_seconds": 0.22768375277519226,
+    "aggregate_cipher_seconds": 0.0,
+    "decrypt_seconds": 0.0,
+    "save_seconds": 0.02180306240916252,
+    "total_seconds": 0.3815877363085747,
+    "baseline_plaintext_bytes": 212992000,
+    "plaintext_upload_bytes": 212992000,
+    "protected_plaintext_bytes": 0,
+    "ciphertext_upload_bytes": 0,
+    "aggregate_ciphertext_bytes": 0,
+    "context_file_bytes": 549176,
+    "output_file_bytes": 10677080,
+    "max_abs_error": 0.0,
+    "mean_abs_error": 0.0,
+    "model_upload_bytes": 212992000,
+    "model_roundtrip_bytes": 212992000,
+    "aggregate_ciphertext_broadcast_bytes": 0,
+    "model_roundtrip_broadcast_bytes": 212992000,
+    "upload_vs_plain_ratio": 1.0,
+    "ciphertext_expansion_ratio": 0.0
+  }
+]

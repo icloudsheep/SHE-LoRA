@@ -6,7 +6,8 @@ data/
 results/
 wandb/
 **/__pycache__/
-benchmark_outputs/
+#benchmark_outputs/
+*.safetensors
 runs/she_ckks/
 temp_output_dir/
 flowertune_llm/she/ckks_*.bytes
