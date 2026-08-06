@@ -15,6 +15,8 @@ import sys
 import os
 import tenseal as ts
 
+from .ckks_packing import pack_column_blocks
+
 
 
 def decrypt(enc,secret_key=None):
@@ -80,14 +82,21 @@ def _get_ckks_context():
 
 def encrypt_cipher_list(cipher_list):
     """
-    Encrypt columns using CKKS. Context is loaded once and reused.
+    Encrypt groups of four adjacent columns using CKKS.
+
+    Context is loaded once and reused.
     cipher_list: list of numpy arrays, each shape (r, num_cols_to_encrypt).
     """
     context = _get_ckks_context()  # Load once, reuse
     ckks_results = []
     for cipher in cipher_list:
-        column_vectors = [cipher[:, i] for i in range(cipher.shape[1])]
-        encrypted_layer = [ts.ckks_vector(context, vec).serialize() for vec in column_vectors]
+        encrypted_layer = [
+            {
+                "ciphertext": ts.ckks_vector(context, values).serialize(),
+                "column_count": column_count,
+            }
+            for values, column_count in pack_column_blocks(cipher)
+        ]
         ckks_results.append(encrypted_layer)
     return pickle.dumps(ckks_results)
 

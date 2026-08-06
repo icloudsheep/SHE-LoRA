@@ -16,6 +16,8 @@ from ..she import decrypt
 from concurrent.futures import ProcessPoolExecutor
 import os
 
+from .ckks_packing import packed_column_transforms
+
 def split_matrix(A_1, num_enc_col):
     """
     Split `A_1` into two matrices, the first matrix only contains the first `num_enc_col` columns, the last column is 0, and the second matrix only contains the last few columns. The sum of the two matrices equals `A_1`.
@@ -152,12 +154,21 @@ def aggregate_palin_ckks_tensor(plain_B,cipherA):
         layer_num = len(plainBlist)
         client_res = []
         for index in range(layer_num):
-            plain_B_tensor = ts.plain_tensor(plainBlist[index])
             layer_res = []
-            for vec_a in cipherAlist[index]:
-                enc_col_a = ts.ckks_vector_from(context,vec_a)
-                temp = enc_col_a.mm(plain_B_tensor.transpose())  #vector
-                layer_res.append(temp)
+            transforms_by_width = {}
+            for packet in cipherAlist[index]:
+                column_count = int(packet["column_count"])
+                transforms = transforms_by_width.get(column_count)
+                if transforms is None:
+                    transforms = [
+                        ts.plain_tensor(transform)
+                        for transform in packed_column_transforms(
+                            np.asarray(plainBlist[index]), column_count
+                        )
+                    ]
+                    transforms_by_width[column_count] = transforms
+                enc_block_a = ts.ckks_vector_from(context, packet["ciphertext"])
+                layer_res.extend(enc_block_a.mm(transform) for transform in transforms)
             client_res.append(layer_res)
         result[clint_key]=client_res
     final_res = []
@@ -176,17 +187,27 @@ def process_client(clint_key, plain_B, cipherA, current_path):
     cipherAlist = pickle.loads(cipherA[clint_key])
     layer_num = len(plainBlist)
     client_res = []
+    with open(os.path.join(current_path, "ckks_full_context.bytes"), "rb") as f:
+        context = ts.context_from(f.read())
 
     for index in range(layer_num):
-        plain_B_tensor = ts.plain_tensor(plainBlist[index])
         layer_res = []
-
-        for vec_a in cipherAlist[index]:
-            with open(os.path.join(current_path, "ckks_full_context.bytes"), "rb") as f:
-                context = ts.context_from(f.read())
-            enc_col_a = ts.ckks_vector_from(context, vec_a)
-            temp = enc_col_a.mm(plain_B_tensor.transpose())
-            layer_res.append(temp.serialize()) 
+        transforms_by_width = {}
+        for packet in cipherAlist[index]:
+            column_count = int(packet["column_count"])
+            transforms = transforms_by_width.get(column_count)
+            if transforms is None:
+                transforms = [
+                    ts.plain_tensor(transform)
+                    for transform in packed_column_transforms(
+                        np.asarray(plainBlist[index]), column_count
+                    )
+                ]
+                transforms_by_width[column_count] = transforms
+            enc_block_a = ts.ckks_vector_from(context, packet["ciphertext"])
+            layer_res.extend(
+                enc_block_a.mm(transform).serialize() for transform in transforms
+            )
         client_res.append(layer_res) 
 
     return clint_key, client_res 

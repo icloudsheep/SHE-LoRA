@@ -186,8 +186,10 @@ benchmark; it does not install the full federated training environment.
 By default it uses the first four files matching
 `temp_output_dir/client_*_output/final_lora/adapter_model.safetensors` and
 compares 0.125%, 1%, 10%, and 25% encryption. For every LoRA A tensor, the
-configured proportion of columns from the beginning of the tensor is encrypted
-with CKKS; all remaining values are aggregated in plaintext. The standalone
+configured proportion of columns from the end of the tensor is encrypted with
+CKKS; all remaining values are aggregated in plaintext. Adjacent encrypted
+columns are packed four at a time into one CKKS ciphertext, matching the
+column-chunking layout used by SHE-LoRA. The standalone
 simulation uses equal client weights because safetensors files do not contain
 Flower's `num_examples` value. For each client it therefore reconstructs and
 aggregates `(B_i / client_count) @ A_i`; it does not average LoRA A and B
@@ -195,9 +197,10 @@ separately. The resulting full update is compressed back to the original LoRA
 rank with the same SVD factorization used by SHE-LoRA.
 
 The execution topology follows the SHE-LoRA implementation: client encryption
-is process-parallel across clients while each client encrypts its CKKS columns
-serially; server-side `B @ Enc(A)` work is process-parallel across clients while
-each server worker processes its columns serially; ciphertext addition and
+is process-parallel across clients while each client encrypts its four-column
+CKKS blocks serially; server-side `B @ Enc(A)` work is process-parallel across
+clients while each server worker expands block results in column order;
+ciphertext addition and
 decryption are serial. `client_workers: null` and `server_workers: null` use up
 to one process per client, bounded by the machine's logical CPU count. Set a
 positive value to cap either process count. `ciphertext_batch_columns` limits
@@ -215,15 +218,20 @@ time. Comparing these pairs shows the effective overlap across clients.
 `time/aggregation_seconds` combines plaintext aggregation, server
 multiplication wall time, and ciphertext aggregation; `time/she_pipeline_seconds`
 adds encryption and decryption. Network metrics include plaintext/ciphertext
-upload bytes and aggregate ciphertext download bytes. CKKS context/key transfer
-and local input file headers are reported separately and are not counted as
-client payload. The comparison fixes `max_clients` at 4; `max_tensors` counts
-LoRA A/B pairs and should remain `null` to process every pair.
+upload bytes, plaintext/ciphertext download bytes, ciphertext packet counts,
+per-client traffic, and full broadcast traffic. Plaintext tensors use the same
+NumPy `.npy` payload serialization as Flower. CKKS context/key transfer,
+protobuf framing, and local input file headers are reported separately or
+excluded and are not counted as model payload. The comparison fixes
+`max_clients` at 4; `max_tensors` counts LoRA A/B pairs and should remain
+`null` to process every pair.
 
-`aggregate_ciphertext_bytes` is one aggregated ciphertext result;
-`aggregate_ciphertext_broadcast_bytes` counts sending that result to every
-client. This makes both a server-only pipeline and a federated-style broadcast
-comparison visible without changing the benchmark execution.
+`plaintext_upload_bytes` and `ciphertext_upload_bytes` are summed across all
+clients. `plaintext_download_bytes` and `aggregate_ciphertext_bytes` each
+describe the payload received by one client. `model_upload_per_client_bytes`
+and `model_download_per_client_bytes` are therefore the table-ready per-client
+values, while `model_roundtrip_broadcast_bytes` counts all client uploads and
+one server broadcast copy per client for a complete federated round.
 
 The default four-client comparison is configured as:
 
@@ -236,10 +244,10 @@ llm:
     server_workers: 4
 ```
 
-The number of encrypted columns is `ceil(input_columns * ratio)`. With the
-current `[4, 3200]` LoRA A tensors, these ratios encrypt the first 4, 32, 320,
-and 800 columns respectively. The benchmark follows the repository's
-one-CKKS-vector-per-column representation.
+The number of encrypted columns is `floor(input_columns * ratio)`. With the
+current `[4, 3200]` LoRA A tensors, these ratios encrypt the last 4, 32, 320,
+and 800 columns respectively. Four-column packing produces 1, 8, 80, and 200
+uploaded ciphertexts per LoRA A tensor, respectively.
 
 Flower application registration and local-simulation topology remain in
 [pyproject.toml](pyproject.toml), because Flower reads them before the Python

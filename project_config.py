@@ -100,6 +100,10 @@ def load_ckks_benchmark_config(validate_paths: bool = True) -> DictConfig:
         raise ValueError(
             "llm.ckks_benchmark.ciphertext_batch_columns must be positive."
         )
+    if int(cfg.ciphertext_batch_columns) % 4:
+        raise ValueError(
+            "llm.ckks_benchmark.ciphertext_batch_columns must be divisible by 4."
+        )
     if not str(cfg.input_glob).strip():
         raise ValueError("llm.ckks_benchmark.input_glob cannot be empty.")
     if cfg.run_name:

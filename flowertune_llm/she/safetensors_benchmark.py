@@ -18,6 +18,15 @@ from safetensors.torch import save_file
 from torch.utils.tensorboard import SummaryWriter
 
 from project_config import load_ckks_benchmark_config
+from flowertune_llm.she.ckks_packing import (
+    CKKS_COLUMNS_PER_CIPHERTEXT,
+    pack_column_blocks,
+    packed_column_transforms,
+)
+from flowertune_llm.she.network_metrics import (
+    network_byte_totals,
+    serialized_ndarray_size,
+)
 
 
 _WORKER_CONTEXT = None
@@ -32,6 +41,8 @@ class BenchmarkMetrics:
     lora_pair_count: int = 0
     encrypted_tensor_count: int = 0
     encrypted_columns: int = 0
+    ciphertext_upload_count: int = 0
+    ciphertext_columns_per_packet: int = CKKS_COLUMNS_PER_CIPHERTEXT
     client_workers: int = 0
     server_workers: int = 0
     context_load_seconds: float = 0.0
@@ -51,6 +62,7 @@ class BenchmarkMetrics:
     plaintext_upload_bytes: int = 0
     protected_plaintext_bytes: int = 0
     ciphertext_upload_bytes: int = 0
+    plaintext_download_bytes: int = 0
     aggregate_ciphertext_bytes: int = 0
     context_file_bytes: int = 0
     output_file_bytes: int = 0
@@ -69,18 +81,14 @@ class BenchmarkMetrics:
             + values["aggregation_seconds"]
             + self.decrypt_seconds
         )
-        values["model_upload_bytes"] = (
-            self.plaintext_upload_bytes + self.ciphertext_upload_bytes
-        )
-        values["model_roundtrip_bytes"] = (
-            values["model_upload_bytes"] + self.aggregate_ciphertext_bytes
-        )
-        values["aggregate_ciphertext_broadcast_bytes"] = (
-            self.aggregate_ciphertext_bytes * self.client_count
-        )
-        values["model_roundtrip_broadcast_bytes"] = (
-            values["model_upload_bytes"]
-            + values["aggregate_ciphertext_broadcast_bytes"]
+        values.update(
+            network_byte_totals(
+                client_count=self.client_count,
+                plaintext_upload_bytes=self.plaintext_upload_bytes,
+                ciphertext_upload_bytes=self.ciphertext_upload_bytes,
+                plaintext_download_bytes=self.plaintext_download_bytes,
+                ciphertext_download_bytes=self.aggregate_ciphertext_bytes,
+            )
         )
         values["upload_vs_plain_ratio"] = (
             values["model_upload_bytes"] / self.baseline_plaintext_bytes
@@ -135,33 +143,42 @@ def _init_server_worker(context_path: str) -> None:
 
 def _encrypt_client_columns(
     task: tuple[int, np.ndarray],
-) -> tuple[int, list[bytes], float]:
+) -> tuple[int, list[tuple[bytes, int]], float]:
     client_index, columns = task
     if _WORKER_CONTEXT is None:
         raise RuntimeError("CKKS worker context was not initialized.")
 
     started = time.perf_counter()
-    encrypted_columns = []
-    for column_index in range(columns.shape[1]):
-        encrypted_columns.append(
-            ts.ckks_vector(_WORKER_CONTEXT, columns[:, column_index]).serialize()
+    encrypted_blocks = [
+        (
+            ts.ckks_vector(_WORKER_CONTEXT, packed_values).serialize(),
+            column_count,
         )
-    return client_index, encrypted_columns, time.perf_counter() - started
+        for packed_values, column_count in pack_column_blocks(columns)
+    ]
+    return client_index, encrypted_blocks, time.perf_counter() - started
 
 
 def _multiply_client_cipher(
-    task: tuple[int, np.ndarray, list[bytes]],
+    task: tuple[int, np.ndarray, list[tuple[bytes, int]]],
 ) -> tuple[int, list[bytes], float]:
-    client_index, scaled_b, encrypted_columns = task
+    client_index, scaled_b, encrypted_blocks = task
     if _WORKER_CONTEXT is None:
         raise RuntimeError("CKKS worker context was not initialized.")
 
     started = time.perf_counter()
-    plain_b_transpose = ts.plain_tensor(scaled_b.transpose())
     results = []
-    for encrypted_column in encrypted_columns:
-        cipher_a = ts.ckks_vector_from(_WORKER_CONTEXT, encrypted_column)
-        results.append(cipher_a.mm(plain_b_transpose).serialize())
+    transforms_by_width = {}
+    for encrypted_block, column_count in encrypted_blocks:
+        cipher_a = ts.ckks_vector_from(_WORKER_CONTEXT, encrypted_block)
+        transforms = transforms_by_width.get(column_count)
+        if transforms is None:
+            transforms = [
+                ts.plain_tensor(transform)
+                for transform in packed_column_transforms(scaled_b, column_count)
+            ]
+            transforms_by_width[column_count] = transforms
+        results.extend(cipher_a.mm(transform).serialize() for transform in transforms)
     return client_index, results, time.perf_counter() - started
 
 
@@ -279,7 +296,7 @@ def _aggregate_lora_pair(
     rank, input_features, output_features, dtype = _validate_lora_pair(
         a_key, a_tensors, b_tensors
     )
-    encrypted_count = min(input_features, math.ceil(input_features * ratio))
+    encrypted_count = min(input_features, math.floor(input_features * ratio))
     client_count = len(a_tensors)
     client_scale = 1.0 / client_count
 
@@ -294,7 +311,7 @@ def _aggregate_lora_pair(
     plain_ba = np.zeros((output_features, input_features), dtype=np.float64)
     for a_matrix, b_matrix in zip(a_arrays, b_arrays):
         plain_a = a_matrix.copy()
-        plain_a[:, :encrypted_count] = 0.0
+        plain_a[:, input_features - encrypted_count :] = 0.0
         plain_ba += (b_matrix * client_scale) @ plain_a
     metrics.aggregate_plain_seconds += time.perf_counter() - started
 
@@ -308,19 +325,24 @@ def _aggregate_lora_pair(
             )
         decrypted_ba = np.empty((output_features, encrypted_count), dtype=np.float64)
 
+        protected_start = input_features - encrypted_count
         for batch_start in range(0, encrypted_count, batch_columns):
             batch_end = min(batch_start + batch_columns, encrypted_count)
+            source_start = protected_start + batch_start
+            source_end = protected_start + batch_end
             expected = np.zeros(
                 (output_features, batch_end - batch_start), dtype=np.float64
             )
 
             for a_matrix, b_matrix in zip(a_arrays, b_arrays):
                 started = time.perf_counter()
-                expected += (b_matrix * client_scale) @ a_matrix[:, batch_start:batch_end]
+                expected += (b_matrix * client_scale) @ a_matrix[
+                    :, source_start:source_end
+                ]
                 metrics.validation_seconds += time.perf_counter() - started
 
             encryption_tasks = [
-                (client_index, a_matrix[:, batch_start:batch_end])
+                (client_index, a_matrix[:, source_start:source_end])
                 for client_index, a_matrix in enumerate(a_arrays)
             ]
             started = time.perf_counter()
@@ -333,8 +355,9 @@ def _aggregate_lora_pair(
                 client_index, encrypted_columns, worker_seconds = future.result()
                 encrypted_by_client[client_index] = encrypted_columns
                 metrics.encrypt_worker_seconds += worker_seconds
+                metrics.ciphertext_upload_count += len(encrypted_columns)
                 metrics.ciphertext_upload_bytes += sum(
-                    len(ciphertext) for ciphertext in encrypted_columns
+                    len(ciphertext) for ciphertext, _ in encrypted_columns
                 )
             metrics.encrypt_seconds += time.perf_counter() - started
 
@@ -363,7 +386,7 @@ def _aggregate_lora_pair(
             error_sum += float(absolute_error.sum())
             error_count += int(absolute_error.size)
 
-        plain_ba[:, :encrypted_count] = decrypted_ba
+        plain_ba[:, protected_start:] = decrypted_ba
 
     started = time.perf_counter()
     aggregated_a, aggregated_b = _compress_ba(plain_ba, rank, dtype)
@@ -394,7 +417,9 @@ def _write_progress(
     for name in (
         "plaintext_upload_bytes",
         "ciphertext_upload_bytes",
+        "plaintext_download_bytes",
         "aggregate_ciphertext_bytes",
+        "ciphertext_upload_count",
     ):
         writer.add_scalar(
             f"network_cumulative/{name}", getattr(metrics, name), global_step
@@ -428,15 +453,22 @@ def _write_final_metrics(
         "plaintext_upload_bytes",
         "protected_plaintext_bytes",
         "ciphertext_upload_bytes",
+        "plaintext_download_bytes",
         "aggregate_ciphertext_bytes",
+        "plaintext_download_broadcast_bytes",
         "aggregate_ciphertext_broadcast_bytes",
         "model_upload_bytes",
+        "model_upload_per_client_bytes",
+        "model_download_bytes",
+        "model_download_per_client_bytes",
+        "model_download_broadcast_bytes",
         "model_roundtrip_bytes",
         "model_roundtrip_broadcast_bytes",
         "context_file_bytes",
         "output_file_bytes",
         "upload_vs_plain_ratio",
         "ciphertext_expansion_ratio",
+        "ciphertext_upload_count",
     ):
         writer.add_scalar(f"network/{name}", values[name], step)
     for name in (
@@ -445,6 +477,7 @@ def _write_final_metrics(
         "lora_pair_count",
         "encrypted_tensor_count",
         "encrypted_columns",
+        "ciphertext_columns_per_packet",
         "client_workers",
         "server_workers",
     ):
@@ -574,11 +607,13 @@ def _run_repeat(
                     for tensor in a_tensors + b_tensors
                 )
                 metrics.baseline_plaintext_bytes += pair_bytes
-                # SHE-LoRA sends the full A tensor with protected columns zeroed.
-                metrics.plaintext_upload_bytes += pair_bytes
+                metrics.plaintext_upload_bytes += sum(
+                    serialized_ndarray_size(tensor.detach().cpu().numpy())
+                    for tensor in a_tensors + b_tensors
+                )
                 encrypted_count = min(
                     a_tensors[0].shape[1],
-                    math.ceil(a_tensors[0].shape[1] * ratio),
+                    math.floor(a_tensors[0].shape[1] * ratio),
                 )
                 metrics.protected_plaintext_bytes += sum(
                     tensor.shape[0] * encrypted_count * tensor.element_size()
@@ -604,6 +639,10 @@ def _run_repeat(
                 )
                 output_tensors[a_key] = aggregated_a.contiguous()
                 output_tensors[b_key] = aggregated_b.contiguous()
+                metrics.plaintext_download_bytes += sum(
+                    serialized_ndarray_size(tensor.detach().cpu().numpy())
+                    for tensor in (aggregated_a, aggregated_b)
+                )
                 error_max = max(error_max, pair_error_max)
                 error_sum += pair_error_sum
                 error_count += pair_error_count
@@ -618,8 +657,15 @@ def _run_repeat(
                     tensor.numel() * tensor.element_size() for tensor in tensors
                 )
                 metrics.baseline_plaintext_bytes += tensor_bytes
-                metrics.plaintext_upload_bytes += tensor_bytes
-                output_tensors[key] = _mean_plain_tensor(tensors, metrics).contiguous()
+                metrics.plaintext_upload_bytes += sum(
+                    serialized_ndarray_size(tensor.detach().cpu().numpy())
+                    for tensor in tensors
+                )
+                aggregated_tensor = _mean_plain_tensor(tensors, metrics).contiguous()
+                output_tensors[key] = aggregated_tensor
+                metrics.plaintext_download_bytes += serialized_ndarray_size(
+                    aggregated_tensor.detach().cpu().numpy()
+                )
     finally:
         if client_pool is not None:
             client_pool.shutdown(wait=True)
